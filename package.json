@@ -4,6 +4,7 @@
   "description": "一键将 Markdown 文件发布到博客仓库",
   "version": "1.0.0",
   "publisher": "user",
+  "icon": "images/icon.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/user/publish-blog-extension"
@@ -117,6 +118,11 @@
           "type": "string",
           "default": "",
           "description": "博客仓库内的子目录"
+        },
+        "publishBlog.proxyPort": {
+          "type": "string",
+          "default": "",
+          "description": "代理端口，用于Git推送失败时启用代理"
         },
         "publishBlog.deepseekApiKey": {
           "type": "string",

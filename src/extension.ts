@@ -240,6 +240,10 @@ async function publishMarkdownFile(fileUri: vscode.Uri): Promise<void> {
     finalFileName
   );
   
+  // 检查内容是否已有frontMatter
+  const frontMatterRegex = /^---\s*\n([\s\S]*?)\n---\s*\n/;
+  const hasFrontMatter = frontMatterRegex.test(contentWithImages);
+  
   // 检查目标目录中是否存在内容相同的文件（不考虑顶部元信息）
   const existingFiles = await fs.readdir(targetDir);
   let existingFilePath: string | null = null;
@@ -264,9 +268,12 @@ async function publishMarkdownFile(fileUri: vscode.Uri): Promise<void> {
         // 去除文件开头的YAML Front Matter（元信息）
         const contentWithoutFrontMatter = existingContent.replace(/^---\s*\n[\s\S]*?\n---\s*\n/, '');
         
+        // 获取当前处理文件的内容（去除可能的frontMatter）
+        const currentContentWithoutFrontMatter = contentWithImages.replace(/^---\s*\n[\s\S]*?\n---\s*\n/, '');
+        
         // 先比较长度，如果差异太大就跳过
-        const lengthDifference = Math.abs(contentWithoutFrontMatter.length - contentWithImages.length);
-        const lengthThreshold = contentWithImages.length * 0.05; // 允许5%的长度差异
+        const lengthDifference = Math.abs(contentWithoutFrontMatter.length - currentContentWithoutFrontMatter.length);
+        const lengthThreshold = currentContentWithoutFrontMatter.length * 0.05; // 允许5%的长度差异
         
         if (lengthDifference > lengthThreshold) {
           console.log(`文件 ${file} 长度差异过大，跳过`);
@@ -274,7 +281,7 @@ async function publishMarkdownFile(fileUri: vscode.Uri): Promise<void> {
         }
         
         // 比较处理后的内容是否一致
-        if (contentWithoutFrontMatter === contentWithImages) {
+        if (contentWithoutFrontMatter === currentContentWithoutFrontMatter) {
           console.log(`找到内容相同的文件: ${file}`);
           existingFilePath = filePath;
           existingFileName = file;
@@ -282,7 +289,7 @@ async function publishMarkdownFile(fileUri: vscode.Uri): Promise<void> {
         } else {
           // 检查是否只有微小差异（如空格、换行符）
           const normalizedExisting = contentWithoutFrontMatter.replace(/\s+/g, ' ').trim();
-          const normalizedProcessed = contentWithImages.replace(/\s+/g, ' ').trim();
+          const normalizedProcessed = currentContentWithoutFrontMatter.replace(/\s+/g, ' ').trim();
           
           if (normalizedExisting === normalizedProcessed) {
             console.log(`找到内容几乎相同的文件(仅空白字符差异): ${file}`);
@@ -336,8 +343,46 @@ async function publishMarkdownFile(fileUri: vscode.Uri): Promise<void> {
   const now = new Date();
   const formattedDate = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`;
   
-  // 创建front matter
-  const frontMatter = `---
+  let newContent: string;
+  
+  if (hasFrontMatter) {
+    // 更新现有的frontMatter
+    console.log('检测到已有frontMatter，进行更新');
+    
+    // 提取和更新frontMatter内容
+    newContent = contentWithImages.replace(frontMatterRegex, (match, frontMatterContent) => {
+      // 解析现有frontMatter
+      const lines = frontMatterContent.split('\n');
+      const frontMatterObj: Record<string, string> = {};
+      
+      // 提取现有的键值对
+      lines.forEach((line: string) => {
+        const parts = line.split(':');
+        if (parts.length >= 2) {
+          const key = parts[0].trim();
+          const value = parts.slice(1).join(':').trim();
+          frontMatterObj[key] = value;
+        }
+      });
+      
+      // 更新需要更新的字段
+      frontMatterObj['title'] = customFileName;
+      frontMatterObj['date'] = formattedDate;
+      frontMatterObj['tags'] = tags;
+      frontMatterObj['categories'] = categories;
+      
+      // 重建frontMatter
+      let updatedFrontMatter = '---\n';
+      for (const [key, value] of Object.entries(frontMatterObj)) {
+        updatedFrontMatter += `${key}: ${value}\n`;
+      }
+      updatedFrontMatter += '---\n\n';
+      
+      return updatedFrontMatter;
+    });
+  } else {
+    // 创建新的front matter
+    const frontMatter = `---
 title: ${customFileName}
 date: ${formattedDate}
 tags: ${tags}
@@ -345,9 +390,9 @@ categories: ${categories}
 ---
 
 `;
-  
-  // 将front matter添加到文件内容前
-  const newContent = frontMatter + contentWithImages;
+    // 将front matter添加到文件内容前
+    newContent = frontMatter + contentWithImages;
+  }
   
   // 确定最终的文件路径和操作类型
   let finalFilePath: string;
@@ -392,35 +437,115 @@ categories: ${categories}
       
       progress.report({ message: '推送到远程...' });
       try {
-        await execAsync('git push', { cwd: blogRepoPath });
-        vscode.window.showInformationMessage(`已成功${operationType} ${finalDisplayName} 到博客`);
+        // 获取代理端口配置
+        const proxyPort = config.get<string>('proxyPort') || '';
+        
+        // 创建超时Promise
+        const timeout = new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('Git push 超时')), 5000);
+        });
+        
+        // 创建git push Promise
+        const gitPush = new Promise<void>(async (resolve, reject) => {
+          try {
+            await execAsync('git push', { cwd: blogRepoPath });
+            resolve();
+          } catch (error) {
+            reject(error);
+          }
+        });
+        
+        // 使用Promise.race进行超时控制
+        try {
+          await Promise.race([gitPush, timeout]);
+          vscode.window.showInformationMessage(`已成功${operationType} ${finalDisplayName} 到博客`);
+        } catch (error) {
+          console.log('Git push 超时或失败，尝试使用代理...');
+          
+          if (proxyPort) {
+            try {
+              // 设置代理环境变量
+              const proxyCmd = `export https_proxy=http://127.0.0.1:${proxyPort} http_proxy=http://127.0.0.1:${proxyPort} all_proxy=socks5://127.0.0.1:${proxyPort}`;
+              
+              // 在设置代理的环境下执行git push
+              await execAsync(`${proxyCmd} && git push`, { cwd: blogRepoPath, shell: '/bin/bash' });
+              vscode.window.showInformationMessage(`已使用代理成功${operationType} ${finalDisplayName} 到博客`);
+            } catch (proxyError) {
+              throw proxyError; // 如果代理尝试也失败，则抛出错误
+            }
+          } else {
+            throw error; // 如果没有配置代理端口，则抛出原始错误
+          }
+        }
       } catch (pushError) {
         console.error('Git push 失败:', pushError);
         const errorMessage = pushError instanceof Error ? pushError.message : String(pushError);
         
-        // 询问用户是否要打开博客文件夹手动处理
-        const openFolderChoice = await vscode.window.showErrorMessage(
-          `推送到远程失败: ${errorMessage}`,
-          '打开文件夹手动处理',
-          '忽略'
-        );
-        
-        if (openFolderChoice === '打开文件夹手动处理') {
-          try {
-            // 确保blogRepoPath不会为undefined
-            if (blogRepoPath) {
-              // 使用 code . 命令打开博客文件夹
-              await execAsync(`code "${blogRepoPath}"`, { cwd: blogRepoPath });
-              vscode.window.showInformationMessage(`已打开博客文件夹: ${blogRepoPath}，请手动推送到远程`);
-            } else {
-              vscode.window.showErrorMessage('博客仓库路径未设置');
+        // 询问用户是否要设置代理端口
+        if (!config.get<string>('proxyPort')) {
+          const setProxyChoice = await vscode.window.showErrorMessage(
+            `推送到远程失败: ${errorMessage}`,
+            '设置代理端口',
+            '打开文件夹手动处理',
+            '忽略'
+          );
+          
+          if (setProxyChoice === '设置代理端口') {
+            const proxyPortInput = await vscode.window.showInputBox({
+              prompt: '请输入代理端口',
+              placeHolder: '例如: 7890',
+              ignoreFocusOut: true
+            });
+            
+            if (proxyPortInput) {
+              await config.update('proxyPort', proxyPortInput, vscode.ConfigurationTarget.Global);
+              vscode.window.showInformationMessage(`已设置代理端口: ${proxyPortInput}，请重新尝试发布`);
+              return;
             }
-          } catch (openError) {
-            console.error('打开文件夹失败:', openError);
-            // 如果使用 code 命令失败且blogRepoPath存在，尝试直接在VS Code中打开文件夹
-            if (blogRepoPath) {
-              const uri = vscode.Uri.file(blogRepoPath);
-              await vscode.commands.executeCommand('vscode.openFolder', uri, { forceNewWindow: true });
+          } else if (setProxyChoice === '打开文件夹手动处理') {
+            try {
+              // 确保blogRepoPath不会为undefined
+              if (blogRepoPath) {
+                // 使用 code . 命令打开博客文件夹
+                await execAsync(`code "${blogRepoPath}"`, { cwd: blogRepoPath });
+                vscode.window.showInformationMessage(`已打开博客文件夹: ${blogRepoPath}，请手动推送到远程`);
+              } else {
+                vscode.window.showErrorMessage('博客仓库路径未设置');
+              }
+            } catch (openError) {
+              console.error('打开文件夹失败:', openError);
+              // 如果使用 code 命令失败且blogRepoPath存在，尝试直接在VS Code中打开文件夹
+              if (blogRepoPath) {
+                const uri = vscode.Uri.file(blogRepoPath);
+                await vscode.commands.executeCommand('vscode.openFolder', uri, { forceNewWindow: true });
+              }
+            }
+          }
+        } else {
+          // 如果已经设置了代理但仍然失败
+          const openFolderChoice = await vscode.window.showErrorMessage(
+            `推送到远程失败: ${errorMessage}`,
+            '打开文件夹手动处理',
+            '忽略'
+          );
+          
+          if (openFolderChoice === '打开文件夹手动处理') {
+            try {
+              // 确保blogRepoPath不会为undefined
+              if (blogRepoPath) {
+                // 使用 code . 命令打开博客文件夹
+                await execAsync(`code "${blogRepoPath}"`, { cwd: blogRepoPath });
+                vscode.window.showInformationMessage(`已打开博客文件夹: ${blogRepoPath}，请手动推送到远程`);
+              } else {
+                vscode.window.showErrorMessage('博客仓库路径未设置');
+              }
+            } catch (openError) {
+              console.error('打开文件夹失败:', openError);
+              // 如果使用 code 命令失败且blogRepoPath存在，尝试直接在VS Code中打开文件夹
+              if (blogRepoPath) {
+                const uri = vscode.Uri.file(blogRepoPath);
+                await vscode.commands.executeCommand('vscode.openFolder', uri, { forceNewWindow: true });
+              }
             }
           }
         }

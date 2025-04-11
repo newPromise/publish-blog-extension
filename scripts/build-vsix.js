@@ -43,6 +43,7 @@ async function buildVsix() {
     await fs.copy(path.join(rootDir, 'dist'), path.join(extensionDir, 'dist'));
     await fs.copy(path.join(rootDir, 'package.json'), path.join(extensionDir, 'package.json'));
     await fs.copy(path.join(rootDir, 'README.md'), path.join(extensionDir, 'README.md'));
+    await fs.copy(path.join(rootDir, 'images'), path.join(extensionDir, 'images'));
     
     // 复制依赖
     console.log('复制依赖...');
